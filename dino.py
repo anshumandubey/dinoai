@@ -1,12 +1,10 @@
 from selenium import webdriver
 from selenium.webdriver.common.keys import Keys
 from time import sleep
-from PIL import Image
 from io import BytesIO
 import skimage as skimage
 from skimage import transform, color, exposure, io
 from skimage.transform import rotate
-from skimage.viewer import ImageViewer
 import numpy as np
 from keras.initializers import normal, identity
 from keras.models import model_from_json
@@ -19,6 +17,8 @@ import argparse
 from collections import deque
 import random
 import json
+import os
+from skimage.util import img_as_uint
 
 
 ACTIONS = 3 # number of valid actions
@@ -36,7 +36,10 @@ LEARNING_RATE = 0.0003
 
 class Dino():
     def __init__(self):
-        self.driver = webdriver.Chrome()
+        option = webdriver.ChromeOptions()
+        option.add_argument("--disable-gpu")
+        option.add_argument("--disable-infobars")
+        self.driver = webdriver.Chrome(options=option)
 
     def open(self):
         self.driver.get('chrome://dino')
@@ -103,17 +106,13 @@ class Dino():
     def get_frame(self,count):
         canvas_details = self.driver.execute_script('return Runner.instance_.canvas.getBoundingClientRect()')
         frame = self.driver.get_screenshot_as_png()
-        # frame_im = Image.open(BytesIO(frame))
-        # frame_im = frame_im.crop((canvas_details['x'], canvas_details['y'], (canvas_details['x'] + canvas_details['width'])/2, canvas_details['y'] + canvas_details['height']))
-        # frame_im = frame_im.resize((162,75))
-        # fn = lambda x : 255 if x > 200 else 0
         frame_img = skimage.io.imread(BytesIO(frame))
+        frame_img = frame_img[int(canvas_details['y']):int(canvas_details['height']+canvas_details['y']),int(canvas_details['x']):int((canvas_details['width']/2)+canvas_details['x'])]
         frame_img = skimage.color.rgb2gray(frame_img)
-        frame_img = skimage.transform.resize(frame_img,(162,75))
+        frame_img = skimage.transform.resize(frame_img,(75,162))
         frame_img = skimage.exposure.rescale_intensity(frame_img,out_range=(0,255))
         frame_img = frame_img / 255.0
-        # frame_im = frame_im.convert('L').point(fn, mode='1')
-        # frame_im.save('/home/adubey/Desktop/SeleniumScripts/DinoAi/frames/frame-{}.png'.format(count))
+        io.imsave('./frames/frame-{}.png'.format(count),img_as_uint(frame_img))
         return frame_img
 
     def get_reward(self):
@@ -146,7 +145,7 @@ class Model():
         model = Sequential()
 
         model.add(Conv2D(32, (3, 3), padding='same',
-                 input_shape=(162,75,3),activation='relu'))
+                 input_shape=(75,162,3),activation='relu'))
         model.add(MaxPooling2D(pool_size=(2, 2)))
         model.add(Dropout(0.25))
         model.add(Conv2D(64, (3, 3), padding='same',activation='relu'))
@@ -159,28 +158,13 @@ class Model():
         model.add(Dense(512,activation='relu'))
         model.add(Dense(3, activation='softmax'))
         model.compile(optimizer='adam',loss="mse", metrics=["accuracy"])
-
-        # model.add(Convolution2D(32, 8, 8, subsample=(4,4),init=lambda shape, name: normal(shape, scale=0.01, name=name), border_mode='same',input_shape=(162,75,3)))
-        # model.add(Activation('relu'))
-        # model.add(Convolution2D(64, 4, 4, subsample=(2,2),init=lambda shape, name: normal(shape, scale=0.01, name=name), border_mode='same'))
-        # model.add(Activation('relu'))
-        # model.add(Convolution2D(64, 3, 3, subsample=(1,1),init=lambda shape, name: normal(shape, scale=0.01, name=name), border_mode='same'))
-        # model.add(Activation('relu'))
-        # model.add(Flatten())
-        # model.add(Dense(512, init=lambda shape, name: normal(shape, scale=0.01, name=name)))
-        # model.add(Activation('relu'))
-        # model.add(Dense(3,init=lambda shape, name: normal(shape, scale=0.01, name=name)))
-    
-        # adam = Adam(lr=1e-6)
-        # model.compile(loss='mse',optimizer=adam)
-        print(model.metrics_names)
         return model
 
     def train(self,model,args):
         game = Dino()
         game.open()
         D = deque()
-        frame = game.get_frame(1)
+        frame = game.get_frame(-1)
         stacked_frames = np.stack((frame,frame,frame),axis=2)
         stacked_frames = stacked_frames.reshape(1,stacked_frames.shape[0],stacked_frames.shape[1],stacked_frames.shape[2])
         print(stacked_frames.shape)
@@ -189,12 +173,15 @@ class Model():
             epsilon = FINAL_EPSILON
             print ("Now we load weight")
             model.load_weights("model.h5")
-            adam = Adam(lr=LEARNING_RATE)
-            model.compile(loss='mse',optimizer=adam)
+            model.compile(optimizer='adam',loss="mse", metrics=["accuracy"])
             print ("Weight load successfully")    
         else:                       #We go to training mode
             OBSERVE = OBSERVATION
             epsilon = INITIAL_EPSILON
+            if os.path.isfile('./model.h5'):
+                model.load_weights("model.h5")
+                model.compile(optimizer='adam',loss="mse", metrics=["accuracy"])
+                print ("Weight load successfully")    
 
         t = 0
         game.start()
@@ -203,7 +190,6 @@ class Model():
                 game.start()
             loss = 0
             Q_sa = 0
-            targets = 0
             action_index = 0
             r_t = 0
             a_t = np.zeros([ACTIONS])
@@ -213,7 +199,8 @@ class Model():
                     action_index = random.randrange(ACTIONS)
                     a_t[action_index] = 1
                 else:
-                    q = model.predict(stacked_frames)       #input a stack of 4 images, get the prediction
+                    q = model.predict(stacked_frames)       #input a stack of 3 images, get the prediction
+                    print(q)
                     max_Q = np.argmax(q)
                     action_index = max_Q
                     a_t[max_Q] = 1
@@ -223,7 +210,7 @@ class Model():
                 epsilon -= (INITIAL_EPSILON - FINAL_EPSILON) / EXPLORE
             
             game.take_action(action_index)
-            frame1 = game.get_frame(1)
+            frame1 = game.get_frame(t)
             frame1 = frame1.reshape(1, frame1.shape[0], frame1.shape[1], 1)
             stacked_frames1 = np.append(frame1,stacked_frames[:,:,:,:2], axis=3)
 
@@ -252,8 +239,8 @@ class Model():
             stacked_frames = stacked_frames1
             t = t+1
 
-            #save progress every 500 iterations
-            if t % 500 == 0:
+            #save progress every 1000 iterations
+            if t % 1000 == 0:
                 print("Save model")
                 model.save_weights("model.h5", overwrite=True)
                 with open("model.json", "w") as outfile:
@@ -270,7 +257,7 @@ class Model():
 
             print("TIMESTEP", t, "/ STATE", state, \
                 "/ EPSILON", epsilon, "/ ACTION", action_index, "/ REWARD", r_t, \
-                "/ Q_MAX " , np.max(Q_sa), "/ Target ", np.max(targets), "/ Loss ", loss)
+                "/ Q_MAX " , np.max(Q_sa), "/ Loss ", loss)
 
         print("Episode finished!")
         print("************************")
@@ -288,6 +275,11 @@ def main():
     game.playGame(args)
 
 if __name__ == "__main__":
+    # config = tf.compat.v1.ConfigProto()
+    # config.gpu_options.allow_growth = True
+    # sess = tf.compat.v1.Session(config=config)
+    # tf.compat.v1.keras.backend.set_session(sess)
+    # main()
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
     sess = tf.Session(config=config)
