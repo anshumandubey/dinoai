@@ -23,12 +23,12 @@ from skimage.util import img_as_uint
 
 ACTIONS = 3 # number of valid actions
 GAMMA = 0.99 # decay rate of past observations
-OBSERVATION = 1000. # timesteps to observe before training
-EXPLORE = 10000. # frames over which to anneal epsilon
+OBSERVATION = 800. # timesteps to observe before training
+EXPLORE = 2500. # frames over which to anneal epsilon
 FINAL_EPSILON = 0.0001 # final value of epsilon
 INITIAL_EPSILON = 0.1 # starting value of epsilon
-REPLAY_MEMORY = 50000 # number of previous transitions to remember
-BATCH = 32 # size of minibatch
+REPLAY_MEMORY = 25000 # number of previous transitions to remember
+BATCH = 64 # size of minibatch
 FRAME_PER_ACTION = 1
 LEARNING_RATE = 0.0003
 
@@ -37,8 +37,8 @@ LEARNING_RATE = 0.0003
 class Dino():
     def __init__(self):
         option = webdriver.ChromeOptions()
-        option.add_argument("--disable-gpu")
-        option.add_argument("--disable-infobars")
+        # option.add_argument("--disable-gpu")
+        option.add_argument("--no-sandbox")
         self.driver = webdriver.Chrome(options=option)
 
     def open(self):
@@ -66,33 +66,6 @@ class Dino():
         score_digits = self.driver.execute_script("return Runner.instance_.distanceMeter.digits")
         score = ''.join(score_digits) 
         return int(score)
-
-    def get_speed(self):
-        try:
-            speed_offset = self.driver.execute_script("return (Runner.instance_.horizon.obstacles)[0].speedOffset")
-        except:
-            speed_offset = 0
-        speed = self.driver.execute_script("return Runner.instance_.currentSpeed")
-        speed = speed_offset + speed
-        return speed
-
-    def get_position(self):
-        try:
-            pos_obs = self.driver.execute_script("return (Runner.instance_.horizon.obstacles)[0].xPos")
-        except:
-            pos_obs = 0
-        dino_width = self.driver.execute_script("return Runner.instance_.tRex.config.WIDTH_DUCK")
-        initial_distance  = self.driver.execute_script("return Runner.instance_.tRex.xPos")
-        if pos_obs != 0:
-            return pos_obs - (dino_width + initial_distance)
-        else:
-            return 1000             #If there is no obstacle, return 1000
-
-    def get_size(self):
-        try:
-            return self.driver.execute_script("return (Runner.instance_.horizon.obstacles)[0].width")
-        except:
-            return 0
     
     def pause(self):
         return self.driver.execute_script("return Runner.instance_.stop()")
@@ -104,15 +77,18 @@ class Dino():
         return self.up()
 
     def get_frame(self,count):
-        canvas_details = self.driver.execute_script('return Runner.instance_.canvas.getBoundingClientRect()')
+        canvas_details = self.driver.execute_script("return Runner.instance_.canvas.getBoundingClientRect()")
+        actual_width = self.driver.execute_script("return Runner.instance_.canvas.width")
+        dino_width = self.driver.execute_script("return Runner.instance_.tRex.config.WIDTH_DUCK")
+        xPos = self.driver.execute_script("return Runner.instance_.tRex.xPos")
         frame = self.driver.get_screenshot_as_png()
         frame_img = skimage.io.imread(BytesIO(frame))
-        frame_img = frame_img[int(canvas_details['y']):int(canvas_details['height']+canvas_details['y']),int(canvas_details['x']):int((canvas_details['width']/2)+canvas_details['x'])]
+        frame_img = frame_img[int(canvas_details['y']):int(canvas_details['height']+canvas_details['y']),int(canvas_details['x']+(int(dino_width)*(int(canvas_details['width'])/int(actual_width)))+(int(xPos)*(int(canvas_details['width'])/int(actual_width)))):int((canvas_details['width']/2)+canvas_details['x'])]
         frame_img = skimage.color.rgb2gray(frame_img)
-        frame_img = skimage.transform.resize(frame_img,(75,162))
+        frame_img = skimage.transform.resize(frame_img,(75,75))
         frame_img = skimage.exposure.rescale_intensity(frame_img,out_range=(0,255))
         frame_img = frame_img / 255.0
-        io.imsave('./frames/frame-{}.png'.format(count),img_as_uint(frame_img))
+        # io.imsave('./frames/frame-{}.png'.format(count),img_as_uint(frame_img))
         return frame_img
 
     def get_reward(self):
@@ -145,15 +121,12 @@ class Model():
         model = Sequential()
 
         model.add(Conv2D(32, (3, 3), padding='same',
-                 input_shape=(75,162,3),activation='relu'))
+                 input_shape=(75,75,3),activation='relu'))
         model.add(MaxPooling2D(pool_size=(2, 2)))
-        model.add(Dropout(0.25))
         model.add(Conv2D(64, (3, 3), padding='same',activation='relu'))
         model.add(MaxPooling2D(pool_size=(2, 2)))
-        model.add(Dropout(0.25))
-        model.add(Conv2D(128, (3, 3), padding='same',activation='relu'))
+        model.add(Conv2D(64, (3, 3), padding='same',activation='relu'))
         model.add(MaxPooling2D(pool_size=(2, 2)))
-        model.add(Dropout(0.25))
         model.add(Flatten())
         model.add(Dense(512,activation='relu'))
         model.add(Dense(3, activation='softmax'))
@@ -167,7 +140,6 @@ class Model():
         frame = game.get_frame(-1)
         stacked_frames = np.stack((frame,frame,frame),axis=2)
         stacked_frames = stacked_frames.reshape(1,stacked_frames.shape[0],stacked_frames.shape[1],stacked_frames.shape[2])
-        print(stacked_frames.shape)
         if args['mode'] == 'Run':
             OBSERVE = 999999999    #We keep observe, never train
             epsilon = FINAL_EPSILON
@@ -186,6 +158,7 @@ class Model():
         t = 0
         game.start()
         while(True):
+            sleep(.1)
             if game.get_crashed()==True:
                 game.start()
             loss = 0
@@ -241,6 +214,8 @@ class Model():
 
             #save progress every 1000 iterations
             if t % 1000 == 0:
+                print("clearing memory..")
+                os.system("sync; echo 1 >  /proc/sys/vm/drop_caches")
                 print("Save model")
                 model.save_weights("model.h5", overwrite=True)
                 with open("model.json", "w") as outfile:
@@ -257,7 +232,7 @@ class Model():
 
             print("TIMESTEP", t, "/ STATE", state, \
                 "/ EPSILON", epsilon, "/ ACTION", action_index, "/ REWARD", r_t, \
-                "/ Q_MAX " , np.max(Q_sa), "/ Loss ", loss)
+                "/ Q_MAX " , np.max(Q_sa), "/ Loss ", loss, "/ Score ", game.get_score())
 
         print("Episode finished!")
         print("************************")
@@ -275,11 +250,6 @@ def main():
     game.playGame(args)
 
 if __name__ == "__main__":
-    # config = tf.compat.v1.ConfigProto()
-    # config.gpu_options.allow_growth = True
-    # sess = tf.compat.v1.Session(config=config)
-    # tf.compat.v1.keras.backend.set_session(sess)
-    # main()
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
     sess = tf.Session(config=config)
